@@ -35,7 +35,7 @@ def handler(sig):
     print(f'Signal: {sig!s} caught, shutting down.')
     loop.remove_signal_handler(SIGTERM)
     loop.add_signal_handler(SIGINT, lambda: None)
-    
+
 
 if __name__ == '__main__':
     asyncio.run(main())
