@@ -1,62 +1,110 @@
-#!/usr/bin/env /home/kincerb/Projects/inotify-testing/venv/bin/python
+#!/usr/bin/env python
 import argparse
 import asyncio
+import functools
 import logging
 import logging.handlers
-import socket
+import signal
 import sys
 from asyncio import StreamReader, StreamWriter
 from pathlib import Path
+from typing import List
+
+from asyncinotify import Inotify, Mask
 
 logger = logging.getLogger(__name__)
 
 
-class SocketServerState:
-    def __init__(self):
-        self._writers = []
+class ServerError(Exception):
+    """Exception class for this script."""
+    pass
 
-    async def add_client(self, reader: StreamReader, writer: StreamWriter):
+
+def handler(sig):
+    loop = asyncio.get_running_loop()
+    for task in asyncio.all_tasks(loop=loop):
+        task.cancel()
+    logger.debug(f'Signal: {sig!s} caught, shutting down.')
+    loop.remove_signal_handler(signal.SIGTERM)
+    loop.add_signal_handler(signal.SIGINT, lambda: None)
+
+
+class SocketServerState:
+    def __init__(self, args):
+        self._cli_args = args
+        self._writers = []
+        self._events = asyncio.Queue()
+        asyncio.create_task(self.monitor_paths(self._cli_args.paths))
+        asyncio.create_task(self._monitor_queue())
+
+    async def add_client(self, reader: StreamReader, writer: StreamWriter) -> None:
         self._writers.append(writer)
         await self._on_connect(writer)
-        # asyncio.create_task(self._publish_event(writer, event_payload))
 
-    async def _on_connect(self, writer: StreamWriter):
+    async def _on_connect(self, writer: StreamWriter) -> None:
+        logger.info(f'New client connected, total of {len(self._writers)} user(s).')
         writer.write('You are now subscribed to inotify events.'.encode())
         await writer.drain()
 
-    async def _publish_event(self, writer: StreamWriter, event_payload):
-        await self._notify_all(event_payload)
+    async def _monitor_queue(self) -> None:
+        while True:
+            await asyncio.sleep(1)
+            event = await self._events.get()
+            logger.debug('Received event off the queue, notifying clients.')
+            await self._notify_all(str(event))
 
-    async def _notify_all(self, event_payload: str):
+    async def _notify_all(self, event_payload: str) -> None:
         for writer in self._writers:
             try:
                 writer.write(event_payload.encode())
                 await writer.drain()
-            except ConnectionError as e:
-                logger.error(f'Failed to deliver message: {e}')
+            except ConnectionError:
                 self._writers.remove(writer)
+                logger.debug(f'Client removed, total of {len(self._writers)} user(s).')
+
+    async def monitor_paths(self, paths: List[str]) -> None:
+        with Inotify() as inotify:
+            for path in paths:
+                logger.debug(f'Adding watch for {path}.')
+                inotify.add_watch(path, Mask.ATTRIB | Mask.ACCESS | Mask.OPEN)
+            async for event in inotify:
+                logger.debug(f'Adding {event} to the queue.')
+                await self._events.put(event)
 
 
-async def main() -> None:
-    args = get_args()
-    setup_logging(verbosity=args.verbosity)
-    server_state = SocketServerState()
+async def main(args: argparse.Namespace) -> None:
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, handler, sig)
+
+    try:
+        setup_server_socket(args.socket)
+    except ServerError as e:
+        logger.critical('Failed to setup socket for server.', exc_info=e)
+        sys.exit(1)
+
+    server_state = SocketServerState(args)
 
     async def client_connected(reader: StreamReader, writer: StreamWriter) -> None:
         await server_state.add_client(reader, writer)
 
-    server = await asyncio.start_unix_server(client_connected, args.socket)
+    try:
+        server = await asyncio.start_unix_server(client_connected, args.socket)
+        async with server:
+            await server.serve_forever()
+    except asyncio.CancelledError:
+        logger.info('Server has shut down.')
 
-    async with server:
-        await server.serve_forever()
 
-
-def setup_server_socket(socket_path: Path, blocking: bool = False) -> socket.SocketType:
-    socket_path.unlink(missing_ok=True)
-    server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server_socket.setblocking(blocking)
-    server_socket.bind(str(socket_path))
-    return server_socket
+def setup_server_socket(socket_path: Path) -> None:
+    """Raise exception if socket path cannot be used."""
+    try:
+        socket_path.unlink(missing_ok=True)
+        socket_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise ServerError(e)
+    except Exception as e:
+        raise ServerError(e)
 
 
 def get_args() -> argparse.Namespace:
@@ -65,6 +113,10 @@ def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description='Server to publish inotify events',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('paths',
+                        nargs='*',
+                        default=['/usr/bin/python3', '/home/kincerb'],
+                        help='Filesystem paths to monitor.')
     parser.add_argument('-s', '--socket',
                         required=False,
                         dest='socket',
@@ -103,4 +155,6 @@ def setup_logging(verbosity: int = 0) -> None:
 
 
 if __name__ == '__main__':
-    main()
+    args = get_args()
+    setup_logging(verbosity=args.verbosity)
+    asyncio.run(main(args))
