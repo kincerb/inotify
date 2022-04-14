@@ -22,6 +22,7 @@ fabric.properties
 */secrets.sh
 */work-secrets.sh
 nvim/pack/
+venv/
 
 .ropeproject/
 *.swp
