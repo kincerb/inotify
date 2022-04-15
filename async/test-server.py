@@ -1,15 +1,17 @@
 #!/usr/bin/env python
 import argparse
 import asyncio
+import json
 import logging
 import logging.handlers
 import signal
 import sys
+import time
 from asyncio import StreamReader, StreamWriter
 from pathlib import Path
 from typing import List
 
-from asyncinotify import Inotify, Mask
+from asyncinotify import Event, Inotify, Mask
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +70,21 @@ class SocketServerState:
                 logger.debug(f"Adding watch for {path}.")
                 inotify.add_watch(path, Mask.ATTRIB | Mask.ACCESS | Mask.OPEN)
             async for event in inotify:
-                logger.debug(f"Adding {event} to the queue.")
-                await self._events.put(event)
+                payload = self.convert_to_payload(event)
+                if not self._writers:
+                    logger.debug(f"No clients, dropping event: {payload}.")
+                    continue
+                logger.debug(f"Adding {payload} to the queue.")
+                await self._events.put(payload)
+
+    @staticmethod
+    def convert_to_payload(event: Event) -> str:
+        name = event.name if event.name is not None else ""
+        full_path = event.path.joinpath(name)
+        return json.dumps(
+            {"path": str(full_path), "event": event.mask.name, "time": time.strftime("%Y-%m-%d %H:%M")},
+            separators=(",", ":"),
+        )
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -140,7 +155,7 @@ def get_args() -> argparse.Namespace:
 def setup_logging(verbosity: int = 0) -> None:
     """Configures global logging object for the script."""
     level = logging.INFO if verbosity == 0 else logging.DEBUG
-    formatter = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s")
+    formatter = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M")
 
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setLevel(level)
