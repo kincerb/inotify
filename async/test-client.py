@@ -27,7 +27,7 @@ def handler(sig):
 
 
 async def monitor_events(reader: StreamReader) -> None:
-    while (message := await reader.readline()) != b"":
+    while (message := await reader.read(1024)) != b"":
         logger.info(message.decode())
     logger.info("Server has closed connection.")
 
