@@ -58,7 +58,7 @@ class SocketServerState:
     async def _notify_all(self, event_payload: str) -> None:
         for writer in self._writers:
             try:
-                writer.write(event_payload.encode())
+                writer.write((event_payload + "\n").encode())
                 await writer.drain()
             except ConnectionError:
                 self._writers.remove(writer)

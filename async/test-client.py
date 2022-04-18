@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 import argparse
 import asyncio
+import json
 import logging
 import logging.handlers
 import signal
 import sys
+import time
 from asyncio import StreamReader
 from pathlib import Path
 
@@ -27,9 +29,24 @@ def handler(sig):
 
 
 async def monitor_events(reader: StreamReader) -> None:
-    while (message := await reader.read(1024)) != b"":
-        logger.info(message.decode())
+    while (message := await reader.readline()) != b"":
+        payload = message.decode().rstrip("\n")
+        logger.debug(f"Recieved {payload}")
+        try:
+            processed_payload = process_payload(payload)
+        except ClientError as e:
+            logger.error(e)
+        else:
+            logger.info(processed_payload)
     logger.info("Server has closed connection.")
+
+
+def process_payload(payload: str) -> dict:
+    try:
+        event = json.loads(payload)
+    except json.JSONDecodeError as e:
+        raise ClientError(f"Failed to load payload: {e.doc}, at {e.pos} line/col: {e.lineno}/{e.colno}")
+    return event
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -78,7 +95,7 @@ def get_args() -> argparse.Namespace:
 def setup_logging(verbosity: int = 0) -> None:
     """Configures global logging object for the script."""
     level = logging.INFO if verbosity == 0 else logging.DEBUG
-    formatter = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s")
+    formatter = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M")
 
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setLevel(level)
